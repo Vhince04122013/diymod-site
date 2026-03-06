@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DIYMOD | AI Minecraft Mods</title>
+    <style>
+        body { background-color: #0f0f0f; color: white; font-family: sans-serif; margin: 0; }
+        
+        /* Top Left Logo */
+        .header { padding: 20px; display: flex; align-items: center; }
+        .logo { width: 50px; height: 50px; background: #333; border-radius: 5px; } /* Replace with your img tag */
+
+        /* AI Button */
+        .ai-section { text-align: center; margin-top: 50px; }
+        .ai-btn { 
+            background: linear-gradient(45deg, #00d4ff, #0055ff);
+            color: white; border: none; padding: 15px 30px; 
+            border-radius: 10px; font-weight: bold; font-size: 1.2rem;
+            cursor: pointer;
+        }
+
+        /* Bottom Menu */
+        .bottom-nav { 
+            position: fixed; bottom: 0; width: 100%; height: 60px;
+            background: #1a1a1a; display: flex; justify-content: space-around; align-items: center;
+        }
+        .plus-btn { 
+            background: white; color: black; width: 40px; height: 40px; 
+            border-radius: 50%; display: flex; justify-content: center; align-items: center;
+            font-size: 24px; font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="logo">LOGO</div> </div>
+
+    <div class="ai-section">
+        <button class="ai-btn" onclick="openAI()">Diymod.Ai</button>
+        <p>Create Minecraft mods (.mcworld) in seconds.</p>
+    </div>
+
+    <div class="bottom-nav">
+        <button onclick="showNeeded()">Needed</button>
+        <div class="plus-btn">+</div>
+        <button onclick="showAccount()">Account</button>
+    </div>
+
+    <script>
+        function openAI() { alert("Diymod.Ai: Tell me what mod to build..."); }
+        function showNeeded() { alert("Apps needed: DIYMOD & ZArchiver"); }
+    </script>
+</body>
+</html>
