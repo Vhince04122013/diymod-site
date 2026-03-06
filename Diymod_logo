@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DIYMOD | Custom Built</title>
+    <style>
+        body { background: #0f0f0f; color: white; font-family: sans-serif; text-align: center; padding-top: 50px; }
+        h1 { color: #00d4ff; font-size: 3rem; letter-spacing: 5px; }
+        p { color: #888; }
+    </style>
+</head>
+<body>
+    <h1>DIYMOD</h1>
+    <p>The home of custom modifications. Coming soon.</p>
+</body>
+</html>
