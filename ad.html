@@ -129,6 +129,11 @@
       <button id="btn-record" type="button">⏺ Record &amp; Download</button>
 
       <label class="field">
+        Include voiceover audio (tab capture)
+        <input id="audio-opt" type="checkbox" title="Record tab audio with the video (shows a picker). Leave off for a prompt-free recording.">
+      </label>
+
+      <label class="field">
         Voice
         <select id="voice-select" title="TTS voice (English preferred)"></select>
       </label>
@@ -614,6 +619,8 @@
    * ------------------------------------------------------------------ */
   var animStart = 0;
   var rafId = null;
+  var animStarted = false;      // guards the timeline so it starts exactly once per run
+  var ttsFallbackTimer = null;  // starts the animation if the TTS utterance onstart never fires
 
   function loop() {
     var t = (performance.now() - animStart) / 1000;
@@ -629,6 +636,16 @@
 
   function stopAnimation() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
+  // Begin (or re-begin) the animation timeline exactly once per run.
+  function beginAnimation() {
+    if (animStarted) return;
+    animStarted = true;
+    if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
+    stopAnimation();
+    animStart = performance.now();
+    loop();
   }
 
   /* ------------------------------------------------------------------ *
@@ -681,8 +698,9 @@
 
   function speakScript() {
     if (!('speechSynthesis' in window)) return false;
+    var u;
     try {
-      var u = new SpeechSynthesisUtterance(SCRIPT);
+      u = new SpeechSynthesisUtterance(SCRIPT);
       u.lang = 'en-US';
       var vs = window.speechSynthesis.getVoices();
       var name = voiceSelect.value;
@@ -692,13 +710,42 @@
       if (pick) u.voice = pick;
       u.rate = parseFloat(rateInput.value) || 1;
       u.pitch = 1;
+    } catch (e) {
+      console.error('TTS setup failed:', e);
+      return false;
+    }
+
+    var started = false;
+    // The timeline is driven by the utterance: it starts when speech actually
+    // begins (onstart) so captions stay in sync with the voiceover.
+    u.onstart = function () {
+      if (started) return;
+      started = true;
+      beginAnimation();
+    };
+    u.onerror = function (e) {
+      console.warn('TTS utterance error:', e && e.error);
+      if (!started) { started = true; beginAnimation(); }
+    };
+    u.onend = function () { /* the animation loop already owns the 14s end */ };
+
+    try {
       window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
-      return true;
+      // cancel() followed by an immediate speak() is flaky in some browsers;
+      // deferring by a short tick avoids the utterance being dropped.
+      setTimeout(function () {
+        try {
+          window.speechSynthesis.speak(u);
+        } catch (e) {
+          console.error('TTS speak failed:', e);
+          if (!started) { started = true; beginAnimation(); }
+        }
+      }, 100);
     } catch (e) {
       console.error('TTS failed:', e);
       return false;
     }
+    return true;
   }
 
   /* ------------------------------------------------------------------ *
@@ -714,6 +761,7 @@
   var btnPlay = document.getElementById('btn-play');
   var btnRecord = document.getElementById('btn-record');
   var statusEl = document.getElementById('status');
+  var audioOpt = document.getElementById('audio-opt');
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -725,6 +773,7 @@
     btnRecord.disabled = isRecording;
     voiceSelect.disabled = isRecording || voiceSelect.options.length === 0;
     rateInput.disabled = isRecording;
+    audioOpt.disabled = isRecording;
   }
 
   function pickMimeType() {
@@ -742,36 +791,52 @@
     return '';
   }
 
-  /* Shared "start" flow: begin animation timeline AND TTS at the same time. */
+  /* Shared "start" flow: TTS utterance drives the timeline start so captions
+   * stay in sync with the voiceover. When TTS is unavailable or never starts,
+   * a fallback timer (or the utterance's onerror) still begins the animation. */
   function startFlow() {
     stopAnimation();
+    animStarted = false;
+    if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    animStart = performance.now();
-    speakScript();                    // speech starts the same moment as the timeline
-    loop();
+
+    var speaking = speakScript();
+    if (!speaking) {
+      // TTS unavailable/failed: begin the timeline immediately.
+      beginAnimation();
+      return;
+    }
+
+    // Safety fallback: if the utterance's onstart never fires, start the
+    // animation anyway so the ad always plays.
+    ttsFallbackTimer = setTimeout(function () {
+      ttsFallbackTimer = null;
+      if (!animStarted) beginAnimation();
+    }, 2000);
   }
 
   function stopRecording() {
     clearTimeout(stopTimer);
     stopTimer = null;
-    // cancel the tab-audio capture track so the picker/stream is released
-    if (displayAudioTrack) {
-      try { displayAudioTrack.stop(); } catch (e) { /* noop */ }
-      displayAudioTrack = null;
-    }
+    // Stop the MediaRecorder FIRST; captured tracks are released afterwards
+    // in saveRecording (the onstop handler) so the file is never left empty.
     if (recorder && recorder.state !== 'inactive') {
       try { recorder.stop(); } catch (e) { console.error('Failed to stop recorder:', e); }
     }
   }
 
   function saveRecording() {
-    // release all captured tracks
-    recordedTracks.forEach(function (tr) { try { tr.stop(); } catch (e) { /* noop */ } });
-    recordedTracks = [];
-
     isRecording = false;
     setStatus('saving — building file', 'saving');
     updateUI();
+
+    // The recorder has now fully stopped — safe to stop/cancel all tracks.
+    if (displayAudioTrack) {
+      try { displayAudioTrack.stop(); } catch (e) { /* noop */ }
+      displayAudioTrack = null;
+    }
+    recordedTracks.forEach(function (tr) { try { tr.stop(); } catch (e) { /* noop */ } });
+    recordedTracks = [];
 
     try {
       var type = recorder && recorder.mimeType ? recorder.mimeType : 'video/webm';
@@ -779,7 +844,14 @@
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = 'maligan-ad.webm';
+      // Derive the extension from the actual mime type.
+      if (type.indexOf('video/mp4') === 0) {
+        a.download = 'maligan-ad.mp4';
+      } else if (type.indexOf('video/webm') === 0) {
+        a.download = 'maligan-ad.webm';
+      } else {
+        a.download = 'maligan-ad.webm';
+      }
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -794,6 +866,16 @@
   }
 
   async function startRecording() {
+    // guard: canvas.captureStream is required for capture
+    if (typeof canvas.captureStream !== 'function') {
+      isRecording = false;
+      setStatus('Recording not supported in this browser', 'saving');
+      console.error('canvas.captureStream is not supported in this browser.');
+      updateUI();
+      return;
+    }
+
+    isRecording = true;
     setStatus('recording', 'recording');
     updateUI();
 
@@ -802,8 +884,10 @@
     recordedTracks = videoStream.getVideoTracks().slice();
     var audioTracks = [];
 
-    // 2) try to capture tab audio so the TTS voiceover is embedded
-    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+    // 2) optional tab-audio capture — only when the user opts in, so the
+    // default path records video-only with no picker/consent prompt.
+    var includeAudio = audioOpt && audioOpt.checked;
+    if (includeAudio && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
       try {
         var disp = await navigator.mediaDevices.getDisplayMedia({
           video: false,
@@ -819,9 +903,10 @@
           disp.getTracks().forEach(function (tr) { try { tr.stop(); } catch (e) { /* noop */ } });
         }
       } catch (e) {
-        console.error('Tab audio capture unavailable/cancelled — recording video only:', e);
+        // cancelled or unsupported — fall back to video-only, do not abort
+        console.warn('Tab audio capture unavailable/cancelled — recording video only:', e);
       }
-    } else {
+    } else if (includeAudio) {
       console.warn('getDisplayMedia not supported — recording video only.');
     }
 
