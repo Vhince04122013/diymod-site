@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maligan Ad</title>
+<style>
+  /* Match the site's dark theme: #0f0f0f bg, #00d4ff accent, sans-serif */
+  * { box-sizing: border-box; }
+  body {
+    background-color: #0f0f0f;
+    color: #ffffff;
+    font-family: sans-serif;
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  .site-header {
+    padding: 18px 22px;
+    font-size: 1.15rem;
+    font-weight: 900;
+    letter-spacing: 10px;
+    color: #00d4ff;
+    text-shadow: 0 0 18px rgba(0, 212, 255, 0.55);
+    border-bottom: 1px solid #222;
+  }
+
+  main { max-width: 1000px; margin: 0 auto; padding: 26px 18px 60px; }
+
+  h1 { text-align: center; font-size: 1.5rem; letter-spacing: 4px; margin: 6px 0 20px; }
+  h1 span { color: #00d4ff; }
+
+  .canvas-wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #222;
+    box-shadow: 0 0 45px rgba(0, 212, 255, 0.14);
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #000;
+    /* 16:9 ratio guard */
+    aspect-ratio: 16 / 9;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    justify-content: center;
+    align-items: center;
+    margin-top: 22px;
+  }
+
+  button {
+    font-family: sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    padding: 12px 22px;
+    border-radius: 10px;
+    border: 1px solid #00d4ff;
+    background: rgba(0, 212, 255, 0.10);
+    color: #00d4ff;
+    cursor: pointer;
+    transition: transform .08s ease, background .15s ease, box-shadow .15s ease;
+  }
+  button:hover:not(:disabled) { background: rgba(0, 212, 255, 0.22); box-shadow: 0 0 18px rgba(0, 212, 255, 0.35); }
+  button:active:not(:disabled) { transform: scale(0.96); }
+  button.primary { background: #00d4ff; color: #07121a; }
+  button.primary:hover:not(:disabled) { background: #38e0ff; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.78rem;
+    color: #9aa7ad;
+    letter-spacing: 1px;
+  }
+  select, input[type="range"] { accent-color: #00d4ff; }
+  select {
+    background: #161616;
+    color: #e8f6ff;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 0.9rem;
+    max-width: 280px;
+  }
+
+  #status {
+    text-align: center;
+    margin-top: 18px;
+    min-height: 20px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #7f8c93;
+  }
+  #status.recording { color: #ff5b5b; }
+  #status.saving    { color: #ffd166; }
+  #status.done      { color: #4ade80; }
+
+  .note {
+    text-align: center;
+    font-size: 0.78rem;
+    color: #55646b;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+
+  <header class="site-header">MALIGAN</header>
+
+  <main>
+    <h1>Maligan <span>Ad</span></h1>
+
+    <div class="canvas-wrap">
+      <canvas id="ad-canvas" width="1280" height="720"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="btn-play" class="primary" type="button">▶ Play / Preview</button>
+      <button id="btn-record" type="button">⏺ Record &amp; Download</button>
+
+      <label class="field">
+        Voice
+        <select id="voice-select" title="TTS voice (English preferred)"></select>
+      </label>
+
+      <label class="field">
+        Speed
+        <input id="rate" type="range" min="0.5" max="2" step="0.1" value="1">
+        <span id="rate-value" style="text-align:center;font-size:.85rem;">1.0x</span>
+      </label>
+    </div>
+
+    <p id="status">idle</p>
+    <p class="note">
+      Captions are drawn on the canvas, so they are burned into the recorded video.
+      "Record &amp; Download" also captures tab audio (when supported) so the TTS voiceover is embedded.
+    </p>
+  </main>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ------------------------------------------------------------------ *
+   * Constants & canvas setup
+   * ------------------------------------------------------------------ */
+  var W = 1280, H = 720;                 // internal canvas resolution (16:9)
+  var TOTAL = 14;                        // full timeline length in seconds
+  var canvas = document.getElementById('ad-canvas');
+  var ctx = canvas.getContext('2d');
+
+  // Offscreen buffer used so post effects (glitch slices, shake) can be
+  // applied to a complete frame before it reaches the visible canvas.
+  var off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  var octx = off.getContext('2d');
+
+  /* ------------------------------------------------------------------ *
+   * TTS script (spoken aloud, matched to the on-screen captions)
+   * ------------------------------------------------------------------ */
+  var SCRIPT =
+    "Hello, I know I didn't send any update for a while, " +
+    "but we were working on this update that is now out! " +
+    "ColorOS 16 design!!! " +
+    "New AI called MalX Float, same name, but you can use MalX Float anywhere! " +
+    "Not just the MalX page! " +
+    "Visit maligan.edgeone.dev and find it!!";
+
+  /* ------------------------------------------------------------------ *
+   * Easing / math helpers
+   * ------------------------------------------------------------------ */
+  function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
+  function easeOutBack(x) {
+    var c1 = 1.70158, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Text drawing helpers (all caption text is drawn ON the canvas so it
+   * is burned into the recorded video).
+   * ------------------------------------------------------------------ */
+  // Letter-spaced centered text (nice for bold titles).
+  function drawSpaced(c, text, x, y, size, color, spacing, weight) {
+    if (size <= 0) return;
+    c.font = (weight || 900) + ' ' + size + 'px sans-serif';
+    c.textAlign = 'left';
+    c.textBaseline = 'middle';
+    c.fillStyle = color;
+    var total = 0, i;
+    for (i = 0; i < text.length; i++) total += c.measureText(text[i]).width + spacing;
+    total -= spacing;
+    var cx = x - total / 2;
+    for (i = 0; i < text.length; i++) {
+      c.fillText(text[i], cx, y);
+      cx += c.measureText(text[i]).width + spacing;
+    }
+  }
+
+  // Plain centered text.
+  function drawCentered(c, text, x, y, size, color, weight) {
+    if (size <= 0) return;
+    c.font = (weight || 700) + ' ' + size + 'px sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillStyle = color;
+    c.fillText(text, x, y);
+  }
+
+  // Chromatic-aberration glitch text: cyan + red offset copies under white.
+  function drawGlitchText(c, text, x, y, size, spacing, weight, intensity) {
+    var jx = (Math.random() * 2 - 1) * intensity;
+    drawSpaced(c, text, x - 4 + jx, y, size, 'rgba(0,255,255,0.6)', spacing, weight);
+    drawSpaced(c, text, x + 4 + jx, y, size, 'rgba(255,0,80,0.6)', spacing, weight);
+    drawSpaced(c, text, x + jx, y, size, '#ffffff', spacing, weight);
+  }
+
+  function drawGlow(c, x, y, r, alpha) {
+    var g = c.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(0,212,255,' + alpha + ')');
+    g.addColorStop(1, 'rgba(0,212,255,0)');
+    c.fillStyle = g;
+    c.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Timeline / scene definition
+   * ------------------------------------------------------------------ */
+  var SCENES = [
+    { id: 0, start: 0.0,   end: 3.6 },   // intro — glitch-in
+    { id: 1, start: 3.6,   end: 6.2 },   // COLOROS 16 DESIGN — flash + pop
+    { id: 2, start: 6.2,   end: 10.2 },  // MalX Float — particle ring
+    { id: 3, start: 10.2,  end: 14.0 }   // CTA — pulsing end card
+  ];
+
+  function sceneAt(t) {
+    for (var i = 0; i < SCENES.length; i++) {
+      if (t < SCENES[i].end) return SCENES[i];
+    }
+    return SCENES[SCENES.length - 1];
+  }
+
+  // "Video edit" event lists: flashes, shakes, glitches at scene cuts.
+  var FLASHES = [
+    { t: 0.02,  a: 0.95, d: 0.18 }, { t: 3.6, a: 0.90, d: 0.18 },
+    { t: 6.2,  a: 0.90, d: 0.18 }, { t: 10.2, a: 0.55, d: 0.16 }
+  ];
+  var SHAKES = [
+    { t: 0.0,  d: 0.6, m: 22 }, { t: 1.0, d: 0.28, m: 10 }, { t: 1.9, d: 0.28, m: 10 },
+    { t: 3.6,  d: 0.3, m: 20 }, { t: 6.2, d: 0.3, m: 18 },
+    { t: 7.5,  d: 0.25, m: 8 }, { t: 8.8, d: 0.25, m: 8 }, { t: 10.2, d: 0.35, m: 14 }
+  ];
+  var GLITCHES = [
+    { t: 0.1, d: 0.4, m: 1 }, { t: 1.0, d: 0.3, m: 0.8 }, { t: 1.9, d: 0.3, m: 0.9 },
+    { t: 3.6, d: 0.25, m: 1 }, { t: 6.2, d: 0.25, m: 1 }, { t: 10.2, d: 0.25, m: 0.6 }
+  ];
+
+  // For each event: after it fires at e.t, its strength decays linearly over e.d
+  // seconds from its peak value (e.a for flashes, e.m for shakes/glitches).
+  function eventStrength(list, t) {
+    var v = 0, i;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      var dt = t - e.t;
+      if (dt >= 0 && dt < e.d) {
+        var k = 1 - dt / e.d;
+        var peak = e.a !== undefined ? e.a : e.m;
+        v = Math.max(v, peak * k);
+      }
+    }
+    return v;
+  }
+
+  function flashAlpha(t) { return eventStrength(FLASHES, t); }
+  function shakeAmount(t) {
+    var amt = eventStrength(SHAKES, t);
+    // gentle constant rumble during the glitchy intro
+    if (t < 3.6) amt = Math.max(amt, 3 * (1 - t / 4.2));
+    return amt;
+  }
+  function glitchStrength(t) { return eventStrength(GLITCHES, t); }
+
+  /* ------------------------------------------------------------------ *
+   * Background
+   * ------------------------------------------------------------------ */
+  function drawBackground(c, t) {
+    var g = c.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0d0d14');
+    g.addColorStop(1, '#050508');
+    c.fillStyle = g;
+    c.fillRect(0, 0, W, H);
+
+    // subtle grid
+    c.strokeStyle = 'rgba(255,255,255,0.035)';
+    c.lineWidth = 1;
+    var x, y;
+    for (x = 80; x < W; x += 80) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke(); }
+    for (y = 80; y < H; y += 80) { c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
+
+    // drifting diagonal light sweep
+    var sw = ((t * 130) % (W + H * 2)) - H;
+    var sweep = c.createLinearGradient(sw, 0, sw + 280, 0);
+    sweep.addColorStop(0, 'rgba(0,212,255,0)');
+    sweep.addColorStop(0.5, 'rgba(0,212,255,0.05)');
+    sweep.addColorStop(1, 'rgba(0,212,255,0)');
+    c.fillStyle = sweep;
+    c.fillRect(0, 0, W, H);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Scenes
+   * ------------------------------------------------------------------ */
+
+  // Scene 0 — intro: glitch-in "HELLO!" + quick zoom + shake.
+  function drawScene0(c, lt) {
+    var cx = W / 2, cy = H / 2;
+    drawGlow(c, cx, cy, 480, 0.16);
+
+    // HELLO! — glitchy pop-in with chromatic split, then settles
+    var k1 = easeOutBack(clamp01((lt - 0.12) / 0.55));
+    if (k1 > 0) {
+      var size = 124 * k1;
+      if (k1 < 0.6) {
+        drawGlitchText(c, 'HELLO!', cx, cy - 60, size, 6, 900, (1 - k1 / 0.6) * 30);
+      } else {
+        drawSpaced(c, 'HELLO!', cx, cy - 60, size, '#ffffff', 6, 900);
+      }
+    }
+
+    // second line — slides up with a fade
+    var k2 = easeOutCubic(clamp01((lt - 1.0) / 0.5));
+    if (k2 > 0) {
+      c.save();
+      c.globalAlpha = k2;
+      drawSpaced(c, "WE'VE BEEN WORKING ON THIS UPDATE", cx, cy + 40, 48 * k2, '#cfd8dc', 3, 800);
+      c.restore();
+    }
+
+    // third line — accent pop
+    var k3 = easeOutBack(clamp01((lt - 1.9) / 0.45));
+    if (k3 > 0) {
+      drawSpaced(c, 'AND IT IS NOW OUT!', cx, cy + 120, 58 * k3, '#00d4ff', 5, 900);
+      drawGlow(c, cx, cy + 120, 300, 0.10 * k3);
+    }
+  }
+
+  // Scene 1 — COLOROS 16 DESIGN!!! big flash + scale pop + rays.
+  function drawScene1(c, lt, t) {
+    var cx = W / 2, cy = H / 2;
+    var k = easeOutCubic(clamp01(lt / 0.6));
+
+    // radiating speed lines
+    c.save();
+    c.translate(cx, cy);
+    c.strokeStyle = 'rgba(0,212,255,0.5)';
+    c.lineWidth = 3;
+    var n = 26, i;
+    for (i = 0; i < n; i++) {
+      var a = (i / n) * Math.PI * 2 + t * 0.6;
+      var len = lerp(120, 760, k);
+      c.beginPath();
+      c.moveTo(Math.cos(a) * 40, Math.sin(a) * 40);
+      c.lineTo(Math.cos(a) * len, Math.sin(a) * len);
+      c.stroke();
+    }
+    c.restore();
+
+    // main title scale-pop with overshoot
+    var kk = easeOutBack(clamp01((lt - 0.08) / 0.5));
+    if (kk > 0) {
+      var size = 86 * kk;
+      drawSpaced(c, 'COLOROS 16 DESIGN!!!', cx, cy, size, '#ffffff', 4, 900);
+      drawSpaced(c, 'COLOROS 16 DESIGN!!!', cx, cy + 4, size, 'rgba(0,212,255,0.5)', 4, 900);
+      drawGlow(c, cx, cy, 360, 0.16 * kk);
+    }
+
+    // energy tag
+    var kt = easeOutCubic(clamp01((lt - 0.7) / 0.4));
+    if (kt > 0) {
+      c.save();
+      c.globalAlpha = kt;
+      drawCentered(c, 'BIG NEWS —', cx, cy - 150, 30 * kt, '#ffd166', 700);
+      c.restore();
+    }
+  }
+
+  // Scene 2 — particle ring reveal + shake.
+  var PARTICLES = [];
+  (function makeParticles() {
+    for (var i = 0; i < 140; i++) {
+      PARTICLES.push({
+        a: Math.random() * Math.PI * 2,
+        r: 230 + Math.random() * 60,
+        size: 2 + Math.random() * 3,
+        speed: 0.5 + Math.random() * 1.2
+      });
+    }
+  })();
+
+  function drawScene2(c, lt, t) {
+    var cx = W / 2, cy = H / 2;
+
+    // ring reveal: converge in, then pulse
+    var ringScale = easeOutCubic(clamp01(lt / 0.5));
+    var pulse = 1 + 0.04 * Math.sin((lt - 0.5) * 4);
+
+    c.save();
+    c.translate(cx, cy);
+    c.scale(ringScale * pulse, ringScale * pulse);
+
+    // ring stroke
+    c.strokeStyle = 'rgba(0,212,255,0.5)';
+    c.lineWidth = 3;
+    c.beginPath();
+    c.arc(0, 0, 260, 0, Math.PI * 2);
+    c.stroke();
+
+    // orbiting particles
+    for (var i = 0; i < PARTICLES.length; i++) {
+      var p = PARTICLES[i];
+      var a = p.a + t * 0.5 + p.speed * t * 0.2;
+      var px = Math.cos(a) * p.r, py = Math.sin(a) * p.r;
+      c.fillStyle = 'rgba(0,212,255,' + (0.7 * ringScale) + ')';
+      c.fillRect(px - p.size / 2, py - p.size / 2, p.size, p.size);
+    }
+    c.restore();
+
+    drawGlow(c, cx, cy, 340, 0.22);
+
+    // text reveals (staggered)
+    var k1 = easeOutCubic(clamp01((lt - 0.55) / 0.4));
+    if (k1 > 0) drawSpaced(c, 'NEW AI CALLED', cx, cy - 120, 40 * k1, '#ffffff', 6, 800);
+
+    var k2 = easeOutBack(clamp01((lt - 0.8) / 0.5));
+    if (k2 > 0) {
+      drawSpaced(c, 'MALX FLOAT', cx, cy - 40, 92 * k2, '#00d4ff', 6, 900);
+      drawGlow(c, cx, cy - 40, 320, 0.12 * k2);
+    }
+
+    var k3 = easeOutCubic(clamp01((lt - 1.8) / 0.5));
+    if (k3 > 0) {
+      c.save();
+      c.globalAlpha = k3;
+      drawSpaced(c, 'SAME NAME, BUT NOW YOU CAN USE', cx, cy + 70, 30 * k3, '#d5e8ef', 2, 700);
+      drawSpaced(c, 'MALX FLOAT ANYWHERE!', cx, cy + 112, 30 * k3, '#d5e8ef', 2, 700);
+      c.restore();
+    }
+
+    var k4 = easeOutCubic(clamp01((lt - 2.9) / 0.5));
+    if (k4 > 0) {
+      drawSpaced(c, 'NOT JUST THE MALX PAGE!', cx, cy + 185, 36 * k4, '#ffffff', 4, 800);
+    }
+  }
+
+  // Scene 3 — CTA pulsing end card.
+  function drawScene3(c, lt, t) {
+    var cx = W / 2, cy = H / 2;
+    var pulse = 1 + 0.03 * Math.sin(t * 3);
+    var glowA = 0.28 + 0.12 * Math.sin(t * 3);
+
+    c.save();
+    c.translate(cx, cy);
+    c.scale(pulse, pulse);
+
+    drawGlow(c, 0, 0, 520, glowA * 0.6);
+
+    var cw = 840, ch = 300;
+    c.fillStyle = 'rgba(10,14,18,0.92)';
+    roundRect(c, -cw / 2, -ch / 2, cw, ch, 26);
+    c.fill();
+    c.strokeStyle = 'rgba(0,212,255,0.85)';
+    c.lineWidth = 3;
+    roundRect(c, -cw / 2, -ch / 2, cw, ch, 26);
+    c.stroke();
+    c.restore();
+
+    var k1 = easeOutCubic(clamp01((lt - 0.15) / 0.5));
+    if (k1 > 0) drawSpaced(c, 'VISIT maligan.edgeone.dev', cx, cy - 55, 58 * k1, '#00d4ff', 3, 800);
+
+    var k2 = easeOutBack(clamp01((lt - 0.6) / 0.5));
+    if (k2 > 0) {
+      drawSpaced(c, 'AND FIND IT!!', cx, cy + 75, 74 * k2, '#ffffff', 8, 900);
+      drawGlow(c, cx, cy + 75, 300, 0.10 * k2);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Post effects on the visible canvas
+   * ------------------------------------------------------------------ */
+  function drawPostFX(c, t) {
+    // CRT scanlines
+    c.fillStyle = 'rgba(0,0,0,0.16)';
+    for (var y = 0; y < H; y += 4) c.fillRect(0, y, W, 1);
+
+    // vignette
+    var vg = c.createRadialGradient(W / 2, H / 2, H * 0.40, W / 2, H / 2, H * 0.78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    c.fillStyle = vg;
+    c.fillRect(0, 0, W, H);
+
+    // film grain
+    var i;
+    for (i = 0; i < 700; i++) {
+      if (Math.random() < 0.05) {
+        c.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.08)';
+        c.fillRect(Math.random() * W, Math.random() * H, 1, 1);
+      }
+    }
+    void t;
+  }
+
+  // Quick zoom + skew settle at the start of each scene ("edit" cut feel).
+  function enterZoom(c, lt) {
+    var dur = 0.22, from = 1.07;
+    var k = easeOutCubic(clamp01(lt / dur));
+    var s = lerp(from, 1, k);
+    var skew = lerp(0.04, 0, k);
+    c.translate(W / 2, H / 2);
+    c.scale(s, s);
+    c.transform(1, 0, skew, 1, -(W / 2) * skew, 0);
+    c.translate(-W / 2, -H / 2);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Main frame renderer
+   * ------------------------------------------------------------------ */
+  function drawFrame(t) {
+    // 1) draw the scene into the offscreen buffer
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, W, H);
+    drawBackground(octx, t);
+
+    var scene = sceneAt(t);
+    var lt = t - scene.start;
+
+    octx.save();
+    enterZoom(octx, lt);
+    switch (scene.id) {
+      case 0: drawScene0(octx, lt); break;
+      case 1: drawScene1(octx, lt, t); break;
+      case 2: drawScene2(octx, lt, t); break;
+      case 3: drawScene3(octx, lt, t); break;
+    }
+    octx.restore();
+
+    // 2) composite to the visible canvas with shake + glitch slicing
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#07070c';
+    ctx.fillRect(0, 0, W, H);
+
+    var sh = shakeAmount(t);
+    var sx = (Math.random() * 2 - 1) * sh;
+    var sy = (Math.random() * 2 - 1) * sh;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    var gs = glitchStrength(t);
+    ctx.drawImage(off, 0, 0);
+    if (gs > 0.04) {
+      // displaced horizontal slices = glitch "edit" effect
+      var n = 3 + Math.floor(Math.random() * 3);
+      for (var i = 0; i < n; i++) {
+        var h = 24 + Math.random() * 100;
+        var y = Math.random() * (H - h);
+        var ox = (Math.random() * 2 - 1) * gs * 50;
+        ctx.drawImage(off, 0, y, W, h, ox, y, W, h);
+      }
+    }
+    ctx.restore();
+
+    // 3) white flash cuts at transitions
+    var fa = flashAlpha(t);
+    if (fa > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + fa + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // 4) end-card fade-out for a clean finish
+    var fadeEnd = TOTAL - 0.4;
+    if (t > fadeEnd) {
+      var f = (t - fadeEnd) / 0.4;
+      ctx.fillStyle = 'rgba(0,0,0,' + clamp01(f) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    drawPostFX(ctx, t);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Animation loop
+   * ------------------------------------------------------------------ */
+  var animStart = 0;
+  var rafId = null;
+
+  function loop() {
+    var t = (performance.now() - animStart) / 1000;
+    if (t >= TOTAL) {
+      drawFrame(TOTAL - 0.02);
+      stopAnimation();
+      if (isRecording) stopRecording();
+      return;
+    }
+    drawFrame(t);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function stopAnimation() {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * TTS (Web Speech API)
+   * ------------------------------------------------------------------ */
+  var voiceSelect = document.getElementById('voice-select');
+  var rateInput = document.getElementById('rate');
+  var rateValue = document.getElementById('rate-value');
+
+  function populateVoices() {
+    if (!('speechSynthesis' in window)) return;
+    var vs = window.speechSynthesis.getVoices();
+    if (!vs.length) return;
+    var prev = voiceSelect.value;
+
+    // prefer English voices, then list everything else
+    var en = vs.filter(function (v) { return v.lang && v.lang.toLowerCase().indexOf('en') === 0; });
+    var other = vs.filter(function (v) { return en.indexOf(v) === -1; });
+    var ordered = en.concat(other);
+
+    voiceSelect.innerHTML = '';
+    ordered.forEach(function (v) {
+      var opt = document.createElement('option');
+      opt.value = v.name;
+      opt.textContent = v.name + ' (' + v.lang + (v.localService ? '' : ' ·remote') + ')';
+      voiceSelect.appendChild(opt);
+    });
+
+    // default to an en-US voice if available
+    var def = vs.find(function (v) { return v.lang && v.lang.toLowerCase() === 'en-us'; }) || en[0];
+    if (def) voiceSelect.value = def.name;
+    else if (prev) voiceSelect.value = prev;
+  }
+
+  // voices load asynchronously in some browsers
+  if ('speechSynthesis' in window) {
+    populateVoices();
+    window.speechSynthesis.onvoiceschanged = populateVoices;
+  } else {
+    var noVoice = document.createElement('option');
+    noVoice.textContent = 'TTS not supported';
+    noVoice.value = '';
+    voiceSelect.appendChild(noVoice);
+    voiceSelect.disabled = true;
+  }
+
+  rateInput.addEventListener('input', function () {
+    rateValue.textContent = parseFloat(rateInput.value).toFixed(1) + 'x';
+  });
+
+  function speakScript() {
+    if (!('speechSynthesis' in window)) return false;
+    try {
+      var u = new SpeechSynthesisUtterance(SCRIPT);
+      u.lang = 'en-US';
+      var vs = window.speechSynthesis.getVoices();
+      var name = voiceSelect.value;
+      var pick = vs.find(function (v) { return v.name === name; }) ||
+                 vs.find(function (v) { return v.lang && v.lang.toLowerCase().indexOf('en') === 0; }) ||
+                 null;
+      if (pick) u.voice = pick;
+      u.rate = parseFloat(rateInput.value) || 1;
+      u.pitch = 1;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+      return true;
+    } catch (e) {
+      console.error('TTS failed:', e);
+      return false;
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Recording (MediaRecorder + canvas.captureStream)
+   * ------------------------------------------------------------------ */
+  var isRecording = false;
+  var recorder = null;
+  var chunks = [];
+  var recordedTracks = [];
+  var displayAudioTrack = null;
+  var stopTimer = null;
+
+  var btnPlay = document.getElementById('btn-play');
+  var btnRecord = document.getElementById('btn-record');
+  var statusEl = document.getElementById('status');
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = cls || '';
+  }
+
+  function updateUI() {
+    btnPlay.disabled = isRecording;
+    btnRecord.disabled = isRecording;
+    voiceSelect.disabled = isRecording || voiceSelect.options.length === 0;
+    rateInput.disabled = isRecording;
+  }
+
+  function pickMimeType() {
+    var candidates = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+      'video/mp4'
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(candidates[i])) {
+        return candidates[i];
+      }
+    }
+    return '';
+  }
+
+  /* Shared "start" flow: begin animation timeline AND TTS at the same time. */
+  function startFlow() {
+    stopAnimation();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    animStart = performance.now();
+    speakScript();                    // speech starts the same moment as the timeline
+    loop();
+  }
+
+  function stopRecording() {
+    clearTimeout(stopTimer);
+    stopTimer = null;
+    // cancel the tab-audio capture track so the picker/stream is released
+    if (displayAudioTrack) {
+      try { displayAudioTrack.stop(); } catch (e) { /* noop */ }
+      displayAudioTrack = null;
+    }
+    if (recorder && recorder.state !== 'inactive') {
+      try { recorder.stop(); } catch (e) { console.error('Failed to stop recorder:', e); }
+    }
+  }
+
+  function saveRecording() {
+    // release all captured tracks
+    recordedTracks.forEach(function (tr) { try { tr.stop(); } catch (e) { /* noop */ } });
+    recordedTracks = [];
+
+    isRecording = false;
+    setStatus('saving — building file', 'saving');
+    updateUI();
+
+    try {
+      var type = recorder && recorder.mimeType ? recorder.mimeType : 'video/webm';
+      var blob = new Blob(chunks, { type: type });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'maligan-ad.webm';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 8000);
+      setStatus('saved — check your downloads', 'done');
+    } catch (e) {
+      console.error('Failed to create/download recording:', e);
+      setStatus('saving failed — see console', 'saving');
+    }
+    recorder = null;
+    chunks = [];
+  }
+
+  async function startRecording() {
+    setStatus('recording', 'recording');
+    updateUI();
+
+    // 1) video track from the canvas
+    var videoStream = canvas.captureStream(30);
+    recordedTracks = videoStream.getVideoTracks().slice();
+    var audioTracks = [];
+
+    // 2) try to capture tab audio so the TTS voiceover is embedded
+    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+      try {
+        var disp = await navigator.mediaDevices.getDisplayMedia({
+          video: false,
+          audio: true,
+          preferCurrentTab: true
+        });
+        var at = disp.getAudioTracks();
+        if (at.length) {
+          audioTracks = at;
+          displayAudioTrack = at[0];
+          recordedTracks = recordedTracks.concat(at);
+        } else {
+          disp.getTracks().forEach(function (tr) { try { tr.stop(); } catch (e) { /* noop */ } });
+        }
+      } catch (e) {
+        console.error('Tab audio capture unavailable/cancelled — recording video only:', e);
+      }
+    } else {
+      console.warn('getDisplayMedia not supported — recording video only.');
+    }
+
+    // 3) combine tracks + start MediaRecorder
+    var stream = new MediaStream(recordedTracks);
+    var mime = pickMimeType();
+    var recOpts = mime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : { videoBitsPerSecond: 8000000 };
+    recorder = new MediaRecorder(stream, recOpts);
+    chunks = [];
+    recorder.ondataavailable = function (e) {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+    recorder.onstop = saveRecording;
+    recorder.start(200);
+
+    // 4) start the animation + TTS now that capture is armed
+    startFlow();
+
+    // 5) safety stop: never record longer than the timeline + margin (~17s)
+    stopTimer = setTimeout(function () {
+      if (isRecording) stopRecording();
+    }, 17000);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Controls
+   * ------------------------------------------------------------------ */
+  btnPlay.addEventListener('click', function () {
+    if (isRecording) return;
+    setStatus('playing', '');
+    startFlow();
+  });
+
+  btnRecord.addEventListener('click', function () {
+    if (isRecording) return;
+    if (!('MediaRecorder' in window)) {
+      setStatus('Recording not supported in this browser', 'saving');
+      console.error('MediaRecorder is not supported in this browser.');
+      return;
+    }
+    startRecording().catch(function (e) {
+      console.error('Recording failed:', e);
+      isRecording = false;
+      setStatus('recording failed — see console', 'saving');
+      updateUI();
+    });
+  });
+
+  // draw a static first frame immediately
+  drawFrame(0.02);
+  updateUI();
+})();
+</script>
+</body>
+</html>
